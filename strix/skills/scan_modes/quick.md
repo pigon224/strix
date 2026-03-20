@@ -15,6 +15,9 @@ Optimize for fast feedback on critical security issues. Skip exhaustive enumerat
 
 **Whitebox (source available)**
 - Focus on recent changes: git diffs, new commits, modified files—these are most likely to contain fresh bugs
+- Read existing `wiki` notes first (`list_notes(category="wiki")`) to avoid remapping from scratch
+- Run a fast static triage on changed files first (`semgrep`, then targeted `sg` queries)
+- Run quick secret and dependency checks (`gitleaks`, `trufflehog`, `trivy fs`) scoped to changed areas when possible
 - Identify security-sensitive patterns in changed code: auth checks, input handling, database queries, file operations
 - Trace user input through modified code paths
 - Check if security controls were modified or bypassed

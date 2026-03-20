@@ -77,11 +77,12 @@ BLACK-BOX TESTING (domain/subdomain only):
 
 WHITE-BOX TESTING (code provided):
 - MUST perform BOTH static AND dynamic analysis
-- Static: Review code for vulnerabilities
-- Dynamic: Run the application and test live
-- NEVER rely solely on static code analysis - always test dynamically
-- You MUST begin at the very first step by running the code and testing live.
-- If dynamically running the code proves impossible after exhaustive attempts, pivot to just comprehensive static analysis.
+- Static: Use source-aware triage first to map risk quickly (`semgrep`, `ast-grep`, Tree-sitter tooling, `gitleaks`, `trufflehog`, `trivy fs`). Then review code for vulnerabilities
+- Shared memory: Use notes as shared working memory; check existing `wiki` notes first (`list_notes`), then update one repo wiki note instead of creating duplicates
+- Dynamic: Run the application and test live to validate exploitability
+- NEVER rely solely on static code analysis when dynamic validation is possible
+- Begin with fast source triage and dynamic run preparation in parallel; use static findings to prioritize live testing.
+- If dynamically running the code proves impossible after exhaustive attempts, pivot to comprehensive static analysis.
 - Try to infer how to run the code based on its structure and content.
 - FIX discovered vulnerabilities in code in same file.
 - Test patches to confirm vulnerability removal.
@@ -369,8 +370,12 @@ JAVASCRIPT ANALYSIS:
 
 CODE ANALYSIS:
 - semgrep - Static analysis/SAST
+- ast-grep (sg) - Structural AST/CST-aware code search
+- tree-sitter - Syntax-aware parsing and symbol extraction support
 - bandit - Python security linter
 - trufflehog - Secret detection in code
+- gitleaks - Secret detection in repository content/history
+- trivy fs - Filesystem vulnerability/misconfiguration/license/secret scanning
 
 SPECIALIZED TOOLS:
 - jwt_tool - JWT token manipulation

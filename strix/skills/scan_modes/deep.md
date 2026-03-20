@@ -15,6 +15,9 @@ Thorough understanding before exploitation. Test every parameter, every endpoint
 
 **Whitebox (source available)**
 - Map every file, module, and code path in the repository
+- Load and maintain shared `wiki` notes from the start (`list_notes(category="wiki")`), then continuously update one repo note
+- Start with broad source-aware triage (`semgrep`, `ast-grep`, `gitleaks`, `trufflehog`, `trivy fs`) and use outputs to drive deep review
+- Use syntax-aware parsing (Tree-sitter tooling) to improve symbol, route, and sink extraction quality
 - Trace all entry points from HTTP handlers to database queries
 - Document all authentication mechanisms and implementations
 - Map authorization checks and access control model
@@ -25,7 +28,7 @@ Thorough understanding before exploitation. Test every parameter, every endpoint
 - Identify all serialization/deserialization points
 - Review file handling: upload, download, processing
 - Understand the deployment model and infrastructure assumptions
-- Check all dependency versions against CVE databases
+- Check all dependency versions and repository risks against CVE/misconfiguration data
 
 **Blackbox (no source)**
 - Exhaustive subdomain enumeration with multiple sources and tools

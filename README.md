@@ -156,6 +156,9 @@ strix --target https://your-app.com --instruction "Perform authenticated testing
 # Multi-target testing (source code + deployed app)
 strix -t https://github.com/org/app -t https://your-app.com
 
+# White-box source-aware scan (local repository)
+strix --target ./app-directory --scan-mode standard
+
 # Focused testing with custom instructions
 strix --target api.your-app.com --instruction "Focus on business logic flaws and IDOR vulnerabilities"
 

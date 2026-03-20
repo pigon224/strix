@@ -90,6 +90,8 @@ class LLM:
                 *list(self.config.skills or []),
                 f"scan_modes/{self.config.scan_mode}",
             ]
+            if self.config.is_whitebox:
+                skills_to_load.append("coordination/source_aware_whitebox")
             skill_content = load_skills(skills_to_load)
             env.globals["get_skill"] = lambda name: skill_content.get(name, "")
 

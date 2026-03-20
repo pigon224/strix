@@ -97,7 +97,9 @@ RUN mkdir -p /home/pentester/.npm-global
 
 RUN npm install -g retire@latest && \
     npm install -g eslint@latest && \
-    npm install -g js-beautify@latest
+    npm install -g js-beautify@latest && \
+    npm install -g @ast-grep/cli@latest && \
+    npm install -g tree-sitter-cli@latest
 
 WORKDIR /home/pentester/tools
 RUN git clone https://github.com/aravind0x7/JS-Snooper.git && \
@@ -110,6 +112,7 @@ RUN git clone https://github.com/aravind0x7/JS-Snooper.git && \
 USER root
 
 RUN curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+RUN curl -sSfL https://raw.githubusercontent.com/gitleaks/gitleaks/master/install.sh | sh -s -- -b /usr/local/bin
 
 RUN apt-get update && apt-get install -y zaproxy
 

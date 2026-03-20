@@ -748,7 +748,9 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
     def _build_agent_config(self, args: argparse.Namespace) -> dict[str, Any]:
         scan_mode = getattr(args, "scan_mode", "deep")
-        llm_config = LLMConfig(scan_mode=scan_mode)
+        llm_config = LLMConfig(
+            scan_mode=scan_mode, is_whitebox=bool(getattr(args, "local_sources", []))
+        )
 
         config = {
             "llm_config": llm_config,

@@ -39,6 +39,13 @@ def _run_agent_in_thread(
             if inherited_messages
             else "started with a fresh context"
         )
+        wiki_memory_instruction = ""
+        if getattr(getattr(agent, "llm_config", None), "is_whitebox", False):
+            wiki_memory_instruction = (
+                '\n        - White-box memory: call list_notes(category="wiki") early, '
+                "reuse existing repo wiki notes, and update the same note instead of "
+                "creating duplicates"
+            )
 
         task_xml = f"""<agent_delegation>
     <identity>
@@ -64,6 +71,7 @@ def _run_agent_in_thread(
         - All agents share /workspace directory and proxy history for better collaboration
         - You can see files created by other agents and proxy traffic from previous work
         - Build upon previous work but focus on your specific delegated task
+{wiki_memory_instruction}
     </instructions>
 </agent_delegation>"""
 
@@ -233,13 +241,21 @@ def create_agent(
 
         timeout = None
         scan_mode = "deep"
+        is_whitebox = False
         if parent_agent and hasattr(parent_agent, "llm_config"):
             if hasattr(parent_agent.llm_config, "timeout"):
                 timeout = parent_agent.llm_config.timeout
             if hasattr(parent_agent.llm_config, "scan_mode"):
                 scan_mode = parent_agent.llm_config.scan_mode
+            if hasattr(parent_agent.llm_config, "is_whitebox"):
+                is_whitebox = parent_agent.llm_config.is_whitebox
 
-        llm_config = LLMConfig(skills=skill_list, timeout=timeout, scan_mode=scan_mode)
+        llm_config = LLMConfig(
+            skills=skill_list,
+            timeout=timeout,
+            scan_mode=scan_mode,
+            is_whitebox=is_whitebox,
+        )
 
         agent_config = {
             "llm_config": llm_config,
