@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import os
 import secrets
 import socket
@@ -25,6 +26,9 @@ CONTAINER_TOOL_SERVER_PORT = 48081
 CONTAINER_CAIDO_PORT = 48080
 ZAP_CONTAINER_PORT = 8090
 ZAP_IMAGE = "zaproxy/zap-stable"
+
+
+logger = logging.getLogger(__name__)
 
 
 class DockerRuntime(AbstractRuntime):
@@ -79,6 +83,7 @@ class DockerRuntime(AbstractRuntime):
             "zap.sh -daemon "
             f"-host 0.0.0.0 -port {ZAP_CONTAINER_PORT} "
             "-config api.addrs.addr.name=.* "
+            "-config api.addrs.addr.regex=true "
             "-config api.addrs.addr.enabled=true "
             f"-config api.key={self._zap_api_key} "
             "-config connection.timeoutInSecs=20"
@@ -91,6 +96,7 @@ class DockerRuntime(AbstractRuntime):
                 detach=True,
                 name=zap_container_name,
                 ports={f"{ZAP_CONTAINER_PORT}/tcp": self._zap_port},
+                environment={"ZAP_PORT": str(ZAP_CONTAINER_PORT)},
                 labels={"strix-scan-id": scan_id, "strix-service": "zap"},
                 extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
             )
