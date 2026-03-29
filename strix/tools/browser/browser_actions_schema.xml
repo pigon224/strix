@@ -33,9 +33,21 @@
       <parameter name="clear" type="boolean" required="false">
         <description>For 'get_console_logs' action: whether to clear console logs after retrieving them. Default is False (keep logs).</description>
       </parameter>
+      <parameter name="url_pattern" type="string" required="false">
+        <description>Required for 'intercept_requests' and 'modify_request' actions. Glob pattern matching URLs to intercept or modify (e.g., "**/api/**", "https://target.com/*", "**"). Applied at the browser context level so it affects all tabs.</description>
+      </parameter>
+      <parameter name="headers" type="object" required="false">
+        <description>For 'modify_request' action. A JSON object of header name/value pairs to inject into matching requests. These are merged with (and override) existing request headers. Example: {"Origin": "https://evil.com", "X-Forwarded-Host": "attacker.com"}.</description>
+      </parameter>
+      <parameter name="script" type="string" required="false">
+        <description>Required for 'inject_init_script' action. JavaScript code that will be injected into every page and frame before any page scripts run. Persists for the lifetime of the browser context. Ideal for installing prototype pollution detectors, overriding built-in functions, or capturing events before page JS initializes.</description>
+      </parameter>
+      <parameter name="max_entries" type="integer" required="false">
+        <description>For 'capture_network' action. Maximum number of network log entries to return (most recent). Default is 100. Maximum stored per tab is 200.</description>
+      </parameter>
     </parameters>
     <returns type="Dict[str, Any]">
-      <description>Response containing: - screenshot: Base64 encoded PNG of the current page state - url: Current page URL - title: Current page title - viewport: Current browser viewport dimensions - tab_id: ID of the current active tab - all_tabs: Dict of all open tab IDs and their URLs - message: Status message about the action performed - js_result: Result of JavaScript execution (for execute_js action) - pdf_saved: File path of saved PDF (for save_pdf action) - console_logs: Array of console messages (for get_console_logs action)   Limited to 50KB total and 200 most recent logs. Individual messages truncated at 1KB. - page_source: HTML source code (for view_source action)   Large pages are truncated to 100KB (keeping beginning and end sections).</description>
+      <description>Response containing: - screenshot: Base64 encoded PNG of the current page state - url: Current page URL - title: Current page title - viewport: Current browser viewport dimensions - tab_id: ID of the current active tab - all_tabs: Dict of all open tab IDs and their URLs - message: Status message about the action performed - js_result: Result of JavaScript execution (for execute_js action) - pdf_saved: File path of saved PDF (for save_pdf action) - console_logs: Array of console messages (for get_console_logs action)   Limited to 50KB total and 200 most recent logs. Individual messages truncated at 1KB. - page_source: HTML source code (for view_source action)   Large pages are truncated to 100KB (keeping beginning and end sections). - network_log: Array of captured request/response entries (for capture_network action). Each entry includes url, method, request_headers, request_body, status, response_headers, response_body (truncated at 10KB), and timestamp. - total_captured: Total number of network entries captured for the tab since launch (for capture_network action).</description>
     </returns>
     <notes>
   Important usage rules:
@@ -91,7 +103,23 @@
       code normally. It can be single line or multi-line.
   13. For form filling, click on the field first, then use 'type' to enter text.
   14. The browser runs in headless mode using Chrome engine for security and performance.
-  15. RESOURCE MANAGEMENT:
+  15. SECURITY TESTING ACTIONS:
+      capture_network: Returns all HTTP requests and responses captured since browser launch.
+        Use immediately after 'launch' to start collecting; call again at any point to read the log.
+        Reveals API endpoints, auth tokens in headers, session cookies, CSRF tokens, and sensitive
+        data in response bodies. Use this before manual navigation to catch all traffic.
+      intercept_requests: Installs a non-blocking route handler that logs all requests matching
+        the pattern and continues them normally. Useful for capturing API calls made by SPAs.
+        Pattern examples: "**/api/**", "**/*.json", "https://target.com/graphql".
+      modify_request: Installs a route handler that injects extra headers into matching requests.
+        Use to test CORS (inject Origin header), cache poisoning (inject X-Forwarded-Host),
+        or header-based auth bypass. Affects all tabs for the lifetime of the context.
+      inject_init_script: Injects JavaScript that runs in EVERY page and frame before any
+        page JS executes. Use for prototype pollution detection:
+          Object.defineProperty(Object.prototype, '__pp_test__', {get(){console.log('PP read:', new Error().stack)}, set(v){console.log('PP write:', v, new Error().stack)}})
+        Or for capturing credentials before framework initialization:
+          const orig = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function(...a){console.log('XHR:',a); return orig.apply(this,a);}
+  16. RESOURCE MANAGEMENT:
       - ALWAYS close tabs you no longer need using 'close_tab' action.
       - ALWAYS close the browser with 'close' action when you have completely finished
         all browser-related tasks. Do not leave the browser running if you're done with it.

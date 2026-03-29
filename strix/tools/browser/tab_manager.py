@@ -303,6 +303,64 @@ class BrowserTabManager:
         except (OSError, ValueError, RuntimeError) as e:
             raise RuntimeError(f"Failed to list tabs: {e}") from e
 
+    def capture_network(
+        self, tab_id: str | None = None, max_entries: int = 100
+    ) -> dict[str, Any]:
+        browser = self._get_agent_browser()
+        if browser is None:
+            raise ValueError("Browser not launched")
+
+        try:
+            result = browser.capture_network(tab_id, max_entries)
+            result["message"] = (
+                f"Network log retrieved: {result.get('total_captured', 0)} total entries captured"
+            )
+        except (OSError, ValueError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to capture network log: {e}") from e
+        else:
+            return result
+
+    def intercept_requests(self, url_pattern: str, tab_id: str | None = None) -> dict[str, Any]:
+        browser = self._get_agent_browser()
+        if browser is None:
+            raise ValueError("Browser not launched")
+
+        try:
+            result = browser.intercept_requests(url_pattern, tab_id)
+        except (OSError, ValueError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to set up request interception: {e}") from e
+        else:
+            return result
+
+    def modify_request(
+        self,
+        url_pattern: str,
+        headers: dict[str, str] | None = None,
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
+        browser = self._get_agent_browser()
+        if browser is None:
+            raise ValueError("Browser not launched")
+
+        try:
+            result = browser.modify_request(url_pattern, headers, tab_id)
+        except (OSError, ValueError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to set up request modification: {e}") from e
+        else:
+            return result
+
+    def inject_init_script(self, script: str, tab_id: str | None = None) -> dict[str, Any]:
+        browser = self._get_agent_browser()
+        if browser is None:
+            raise ValueError("Browser not launched")
+
+        try:
+            result = browser.inject_init_script(script, tab_id)
+        except (OSError, ValueError, RuntimeError) as e:
+            raise RuntimeError(f"Failed to inject init script: {e}") from e
+        else:
+            return result
+
     def close_browser(self) -> dict[str, Any]:
         agent_id = get_current_agent_id()
         with self._lock:
