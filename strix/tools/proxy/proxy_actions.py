@@ -1,6 +1,7 @@
 from typing import Any, Literal
 
 from strix.tools.registry import register_tool
+from strix.tools.scope_checker import is_url_in_scope, scope_error
 
 
 RequestPart = Literal["request", "response"]
@@ -55,6 +56,9 @@ def send_request(
     body: str = "",
     timeout: int = 30,
 ) -> dict[str, Any]:
+    if not is_url_in_scope(url):
+        return scope_error(url)
+
     from .proxy_manager import get_proxy_manager
 
     if headers is None:

@@ -23,6 +23,8 @@ HOST_GATEWAY_HOSTNAME = "host.docker.internal"
 DOCKER_TIMEOUT = 60
 CONTAINER_TOOL_SERVER_PORT = 48081
 CONTAINER_CAIDO_PORT = 48080
+ZAP_CONTAINER_PORT = 8090
+ZAP_IMAGE = "zaproxy/zap-stable"
 
 
 class DockerRuntime(AbstractRuntime):
@@ -40,10 +42,163 @@ class DockerRuntime(AbstractRuntime):
         self._tool_server_token: str | None = None
         self._caido_port: int | None = None
 
+        self._zap_container: Container | None = None
+        self._zap_port: int | None = None
+        self._zap_api_key: str | None = None
+
     def _find_available_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("", 0))
             return cast("int", s.getsockname()[1])
+
+    def _start_zap_container(self, scan_id: str) -> None:
+        """
+        Start a zaproxy/zap-stable container in daemon mode alongside the Strix sandbox.
+        The sandbox reaches ZAP via host.docker.internal:<zap_port>.
+        No-op if ZAP is already running or the image is not available.
+        """
+        zap_container_name = f"strix-zap-{scan_id}"
+
+        # Stop any stale ZAP container from a previous scan with the same ID
+        with contextlib.suppress(NotFound):
+            old = self.client.containers.get(zap_container_name)
+            with contextlib.suppress(Exception):
+                old.stop(timeout=5)
+            old.remove(force=True)
+
+        try:
+            self.client.images.get(ZAP_IMAGE)
+        except ImageNotFound:
+            logger.info("ZAP image %s not found — skipping ZAP startup", ZAP_IMAGE)
+            return
+
+        self._zap_port = self._find_available_port()
+        self._zap_api_key = secrets.token_urlsafe(24)
+
+        zap_cmd = (
+            "zap.sh -daemon "
+            f"-host 0.0.0.0 -port {ZAP_CONTAINER_PORT} "
+            "-config api.addrs.addr.name=.* "
+            "-config api.addrs.addr.enabled=true "
+            f"-config api.key={self._zap_api_key} "
+            "-config connection.timeoutInSecs=20"
+        )
+
+        try:
+            self._zap_container = self.client.containers.run(
+                ZAP_IMAGE,
+                command=zap_cmd,
+                detach=True,
+                name=zap_container_name,
+                ports={f"{ZAP_CONTAINER_PORT}/tcp": self._zap_port},
+                labels={"strix-scan-id": scan_id, "strix-service": "zap"},
+                extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
+            )
+            logger.info("ZAP container started on host port %d", self._zap_port)
+        except (DockerException, RequestsConnectionError) as exc:
+            logger.warning("Could not start ZAP container: %s", exc)
+            self._zap_container = None
+            self._zap_port = None
+            self._zap_api_key = None
+
+    def _stop_zap_container(self) -> None:
+        """Stop and remove the ZAP sidecar container."""
+        if self._zap_container is None:
+            return
+        container_name = None
+        try:
+            container_name = self._zap_container.name
+        except Exception:  # noqa: BLE001
+            pass
+        self._zap_container = None
+        self._zap_port = None
+        self._zap_api_key = None
+        if container_name:
+            import subprocess
+            subprocess.Popen(  # noqa: S603
+                ["docker", "rm", "-f", container_name],  # noqa: S607
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+    def _get_zap_env_vars(self) -> dict[str, str]:
+        """Return ZAP connection env vars to inject into the sandbox container."""
+        if self._zap_port is None or self._zap_api_key is None:
+            return {}
+        return {
+            "STRIX_ZAP_ENABLED": "true",
+            "STRIX_ZAP_API_URL": f"http://{HOST_GATEWAY_HOSTNAME}:{self._zap_port}",
+            "STRIX_ZAP_API_KEY": self._zap_api_key,
+        }
+
+    def _get_scope_env_vars(self) -> dict[str, str]:
+        """Serialize authorized targets into a Docker env var for in-container scope enforcement."""
+        import json
+
+        try:
+            from strix.telemetry.tracer import get_global_tracer
+
+            tracer = get_global_tracer()
+            if not tracer or not tracer.scan_config:
+                return {}
+            targets = tracer.scan_config.get("targets", [])
+            if not targets:
+                return {}
+
+            # Only pass the fields needed for scope checking
+            scope_entries = []
+            for t in targets:
+                scope_entries.append(
+                    {
+                        "type": t.get("type", ""),
+                        "value": t.get("details", {}).get("target_url")
+                        or t.get("details", {}).get("target_ip")
+                        or t.get("details", {}).get("target_repo")
+                        or t.get("details", {}).get("target_path")
+                        or t.get("original", ""),
+                    }
+                )
+
+            if not scope_entries:
+                return {}
+
+            env_vars: dict[str, str] = {
+                "STRIX_AUTHORIZED_SCOPE_JSON": json.dumps(scope_entries),
+            }
+
+            # Propagate strict-domain flag if set on the host
+            import os
+
+            strict = os.environ.get("STRIX_SCOPE_STRICT_DOMAINS", "")
+            if strict:
+                env_vars["STRIX_SCOPE_STRICT_DOMAINS"] = strict
+
+            return env_vars
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _get_auth_env_vars(self) -> dict[str, str]:
+        """Read auth_config from the active scan tracer and return Docker env vars to inject."""
+        import json
+
+        try:
+            from strix.telemetry.tracer import get_global_tracer
+
+            tracer = get_global_tracer()
+            if not tracer or not tracer.scan_config:
+                return {}
+            auth_config = tracer.scan_config.get("auth_config", {})
+            if not auth_config.get("configured"):
+                return {}
+            env_vars: dict[str, str] = {}
+            if auth_config.get("headers"):
+                env_vars["STRIX_AUTH_HEADERS_JSON"] = json.dumps(auth_config["headers"])
+            if auth_config.get("cookies"):
+                env_vars["STRIX_AUTH_COOKIES_JSON"] = json.dumps(auth_config["cookies"])
+            return env_vars
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _get_scan_id(self, agent_id: str) -> str:
         try:
@@ -116,6 +271,10 @@ class DockerRuntime(AbstractRuntime):
 
         self._verify_image_available(image_name)
 
+        # Start ZAP sidecar before the main sandbox so env vars are ready
+        if self._zap_container is None:
+            self._start_zap_container(scan_id)
+
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
@@ -131,6 +290,17 @@ class DockerRuntime(AbstractRuntime):
                 self._tool_server_token = secrets.token_urlsafe(32)
                 execution_timeout = Config.get("strix_sandbox_execution_timeout") or "120"
 
+                container_env = {
+                    "PYTHONUNBUFFERED": "1",
+                    "TOOL_SERVER_PORT": str(CONTAINER_TOOL_SERVER_PORT),
+                    "TOOL_SERVER_TOKEN": self._tool_server_token,
+                    "STRIX_SANDBOX_EXECUTION_TIMEOUT": str(execution_timeout),
+                    "HOST_GATEWAY": HOST_GATEWAY_HOSTNAME,
+                }
+                container_env.update(self._get_scope_env_vars())
+                container_env.update(self._get_auth_env_vars())
+                container_env.update(self._get_zap_env_vars())
+
                 container = self.client.containers.run(
                     image_name,
                     command="sleep infinity",
@@ -143,13 +313,7 @@ class DockerRuntime(AbstractRuntime):
                     },
                     cap_add=["NET_ADMIN", "NET_RAW"],
                     labels={"strix-scan-id": scan_id},
-                    environment={
-                        "PYTHONUNBUFFERED": "1",
-                        "TOOL_SERVER_PORT": str(CONTAINER_TOOL_SERVER_PORT),
-                        "TOOL_SERVER_TOKEN": self._tool_server_token,
-                        "STRIX_SANDBOX_EXECUTION_TIMEOUT": str(execution_timeout),
-                        "HOST_GATEWAY": HOST_GATEWAY_HOSTNAME,
-                    },
+                    environment=container_env,
                     extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
                     tty=True,
                 )
@@ -320,6 +484,7 @@ class DockerRuntime(AbstractRuntime):
         return "127.0.0.1"
 
     async def destroy_sandbox(self, container_id: str) -> None:
+        self._stop_zap_container()
         try:
             container = self.client.containers.get(container_id)
             container.stop()
@@ -332,6 +497,7 @@ class DockerRuntime(AbstractRuntime):
             pass
 
     def cleanup(self) -> None:
+        self._stop_zap_container()
         if self._scan_container is not None:
             container_name = self._scan_container.name
             self._scan_container = None

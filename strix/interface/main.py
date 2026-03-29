@@ -262,6 +262,40 @@ def get_version() -> str:
         return "unknown"
 
 
+def _build_auth_config(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> dict[str, Any]:
+    """Build auth_config dict from parsed CLI auth args. Returns {} if nothing provided."""
+    headers: dict[str, str] = {}
+    cookies: list[dict[str, str]] = []
+
+    if getattr(args, "auth_token", None):
+        headers["Authorization"] = f"Bearer {args.auth_token}"
+
+    for raw in getattr(args, "auth_headers", []) or []:
+        if ": " in raw:
+            key, _, value = raw.partition(": ")
+            headers[key.strip()] = value.strip()
+        else:
+            parser.error(
+                f"Invalid --auth-header format '{raw}'. Use 'HeaderName: HeaderValue'"
+            )
+
+    for raw in getattr(args, "auth_cookies", []) or []:
+        if "=" in raw:
+            name, _, value = raw.partition("=")
+            cookies.append({"name": name.strip(), "value": value.strip()})
+        else:
+            parser.error(
+                f"Invalid --auth-cookie format '{raw}'. Use 'name=value'"
+            )
+
+    if not headers and not cookies:
+        return {}
+
+    return {"headers": headers, "cookies": cookies, "configured": True}
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Strix Multi-Agent Cybersecurity Penetration Testing Tool",
@@ -363,6 +397,54 @@ Examples:
         help="Path to a custom config file (JSON) to use instead of ~/.strix/cli-config.json",
     )
 
+    parser.add_argument(
+        "--scope-strict-domains",
+        action="store_true",
+        dest="scope_strict_domains",
+        help=(
+            "Restrict scope to exact target domains only — subdomains are blocked. "
+            "Default: subdomains of authorized targets are allowed. "
+            "Example: with --target example.com and this flag, sub.example.com is blocked."
+        ),
+    )
+
+    parser.add_argument(
+        "--auth-token",
+        dest="auth_token",
+        type=str,
+        help=(
+            "Bearer token for authenticated testing "
+            "(shorthand for --auth-header 'Authorization: Bearer <value>'). "
+            "Supports Microsoft Azure AD / Entra ID tokens and any other Bearer scheme."
+        ),
+    )
+
+    parser.add_argument(
+        "--auth-header",
+        dest="auth_headers",
+        action="append",
+        default=[],
+        metavar="KEY: VALUE",
+        help=(
+            "HTTP header to inject into all browser requests (repeatable). "
+            "Format: 'HeaderName: HeaderValue'. "
+            "Example: --auth-header 'X-Api-Key: abc123'"
+        ),
+    )
+
+    parser.add_argument(
+        "--auth-cookie",
+        dest="auth_cookies",
+        action="append",
+        default=[],
+        metavar="name=value",
+        help=(
+            "Cookie to inject into the browser session (repeatable). "
+            "Format: 'name=value'. "
+            "Example: --auth-cookie 'session=eyJ...'"
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.instruction and args.instruction_file:
@@ -398,6 +480,12 @@ Examples:
 
     assign_workspace_subdirs(args.targets_info)
     rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
+
+    args.auth_config = _build_auth_config(args, parser)
+
+    if getattr(args, "scope_strict_domains", False):
+        import os
+        os.environ["STRIX_SCOPE_STRICT_DOMAINS"] = "true"
 
     return args
 

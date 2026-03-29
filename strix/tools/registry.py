@@ -172,11 +172,16 @@ def _has_perplexity_api() -> bool:
     return bool(Config.load().get("env", {}).get("PERPLEXITY_API_KEY"))
 
 
+def _is_zap_enabled() -> bool:
+    return os.getenv("STRIX_ZAP_ENABLED", "").lower() == "true"
+
+
 def _should_register_tool(
     *,
     sandbox_execution: bool,
     requires_browser_mode: bool,
     requires_web_search_mode: bool,
+    requires_zap_mode: bool = False,
 ) -> bool:
     sandbox_mode = _is_sandbox_mode()
 
@@ -184,7 +189,11 @@ def _should_register_tool(
         return False
     if requires_browser_mode and _is_browser_disabled():
         return False
-    return not (requires_web_search_mode and not _has_perplexity_api())
+    if requires_web_search_mode and not _has_perplexity_api():
+        return False
+    if requires_zap_mode and not _is_zap_enabled():
+        return False
+    return True
 
 
 def register_tool(
@@ -193,12 +202,14 @@ def register_tool(
     sandbox_execution: bool = True,
     requires_browser_mode: bool = False,
     requires_web_search_mode: bool = False,
+    requires_zap_mode: bool = False,
 ) -> Callable[..., Any]:
     def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
         if not _should_register_tool(
             sandbox_execution=sandbox_execution,
             requires_browser_mode=requires_browser_mode,
             requires_web_search_mode=requires_web_search_mode,
+            requires_zap_mode=requires_zap_mode,
         ):
             return f
 

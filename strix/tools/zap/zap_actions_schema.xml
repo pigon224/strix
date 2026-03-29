@@ -1,0 +1,40 @@
+<tool name="zap_action">
+  <description>
+    Run OWASP ZAP security scans against in-scope web application targets.
+    ZAP runs as a dedicated Docker container (zaproxy/zap-stable) alongside the sandbox.
+
+    Typical workflow:
+      1. zap_action spider target=https://app.com        — crawl the app
+      2. zap_action status                               — wait until spider progress=100
+      3. zap_action ajax_spider target=https://app.com  — crawl JS-rendered pages (SPAs)
+      4. zap_action status                               — wait until ajax_spider_running=false
+      5. zap_action active_scan target=https://app.com  — run active vulnerability tests
+      6. zap_action status                               — wait until active scan progress=100
+      7. zap_action alerts                               — retrieve all findings
+
+    Load the zap skill before first use: load_skill skill_name=zap
+    Only use this tool on in-scope targets. ZAP active scanning is intrusive.
+  </description>
+  <parameters>
+    <parameter name="action" type="string" required="true">
+      Action to perform. One of:
+        spider       — Traditional spider: crawl links and forms.
+        ajax_spider  — AJAX spider: crawl JS-heavy SPAs with headless browser.
+        active_scan  — Active vulnerability scanner (intrusive, run after spider).
+        status       — Get progress of all running spiders and active scans.
+        alerts       — Retrieve vulnerability findings (run after scans complete).
+        stop         — Stop a running spider or active scan.
+    </parameter>
+    <parameter name="target" type="string" required="false">
+      Target URL for spider, ajax_spider, or active_scan actions.
+      Must be an in-scope authorized target (e.g., https://app.example.com).
+    </parameter>
+    <parameter name="scan_id" type="string" required="false">
+      ZAP scan ID returned by spider or active_scan actions.
+      Used with alerts (filter by scan) and stop (stop specific scan).
+    </parameter>
+    <parameter name="max_alerts" type="integer" required="false">
+      Maximum number of alerts to return from the alerts action. Default: 100.
+    </parameter>
+  </parameters>
+</tool>
