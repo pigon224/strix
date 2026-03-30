@@ -181,11 +181,22 @@ class BrowserInstance:
         # Read pre-configured auth headers from environment (set by docker_runtime)
         extra_http_headers: dict[str, str] = {}
         auth_headers_raw = os.environ.get("STRIX_AUTH_HEADERS_JSON", "")
+        # Fallback: read from file injected by docker_runtime for large payloads
+        if not auth_headers_raw:
+            try:
+                header_file = Path("/app/certs/auth_headers.json")
+                if header_file.exists():
+                    auth_headers_raw = header_file.read_text(encoding="utf-8")
+            except OSError:
+                pass
         if auth_headers_raw:
             try:
                 extra_http_headers = json.loads(auth_headers_raw)
             except (json.JSONDecodeError, ValueError):
                 pass
+
+        # Extract Cookie header — Chromium ignores it in extra_http_headers
+        cookie_header_value = extra_http_headers.pop("Cookie", None)
 
         context_kwargs: dict[str, Any] = {
             "viewport": {"width": 1280, "height": 720},
@@ -209,6 +220,9 @@ class BrowserInstance:
         await self._setup_network_capture(page, tab_id)
 
         if url:
+            if cookie_header_value:
+                await self._inject_cookie_header(url, cookie_header_value)
+            await self._inject_auth_cookies_if_needed(url)
             await page.goto(url, wait_until="domcontentloaded")
 
         return await self._get_page_state(tab_id)
@@ -259,18 +273,53 @@ class BrowserInstance:
         with self._execution_lock:
             return self._run_async(self._goto(url, tab_id))
 
+    async def _inject_cookie_header(
+        self, url: str, cookie_header: str
+    ) -> None:
+        """Parse a raw Cookie header string and inject via add_cookies."""
+        if not self.context:
+            return
+        for pair in cookie_header.split("; "):
+            pair = pair.strip()
+            if "=" not in pair:
+                continue
+            name, _, value = pair.partition("=")
+            cookie_entry: dict[str, Any] = {
+                "name": name.strip(),
+                "value": value.strip(),
+                "url": url,
+            }
+            if name.strip().startswith(
+                ("__Host-", "__Secure-")
+            ):
+                cookie_entry["secure"] = True
+            await self.context.add_cookies([cookie_entry])
+
     async def _inject_auth_cookies_if_needed(self, url: str) -> None:
         """Inject pre-configured auth cookies on first navigation, bound to the target origin."""
         if self._auth_cookies_injected or not self.context:
             return
         self._auth_cookies_injected = True
         auth_cookies_raw = os.environ.get("STRIX_AUTH_COOKIES_JSON", "")
+        # Fallback: read from file injected by docker_runtime for large payloads
+        if not auth_cookies_raw:
+            try:
+                cookie_file = Path("/app/certs/auth_cookies.json")
+                if cookie_file.exists():
+                    auth_cookies_raw = cookie_file.read_text(encoding="utf-8")
+            except OSError:
+                pass
         if not auth_cookies_raw:
             return
         try:
             cookies: list[dict[str, str]] = json.loads(auth_cookies_raw)
             for cookie in cookies:
-                await self.context.add_cookies([{**cookie, "url": url}])
+                cookie_entry: dict[str, Any] = {**cookie, "url": url}
+                if cookie.get("name", "").startswith("__Host-") or cookie.get(
+                    "name", ""
+                ).startswith("__Secure-"):
+                    cookie_entry["secure"] = True
+                await self.context.add_cookies([cookie_entry])
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -397,6 +446,7 @@ class BrowserInstance:
         await self._setup_network_capture(page, tab_id)
 
         if url:
+            await self._inject_auth_cookies_if_needed(url)
             await page.goto(url, wait_until="domcontentloaded")
 
         return await self._get_page_state(tab_id)

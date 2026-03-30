@@ -193,18 +193,68 @@ class DockerRuntime(AbstractRuntime):
 
             tracer = get_global_tracer()
             if not tracer or not tracer.scan_config:
+                logger.debug("Auth env vars: no tracer or scan_config available")
                 return {}
             auth_config = tracer.scan_config.get("auth_config", {})
             if not auth_config.get("configured"):
+                logger.debug("Auth env vars: auth_config not configured")
                 return {}
             env_vars: dict[str, str] = {}
             if auth_config.get("headers"):
                 env_vars["STRIX_AUTH_HEADERS_JSON"] = json.dumps(auth_config["headers"])
             if auth_config.get("cookies"):
                 env_vars["STRIX_AUTH_COOKIES_JSON"] = json.dumps(auth_config["cookies"])
+            logger.info(
+                "Auth env vars: injecting %d header(s), %d cookie(s)",
+                len(auth_config.get("headers", {})),
+                len(auth_config.get("cookies", [])),
+            )
             return env_vars
         except Exception:  # noqa: BLE001
+            logger.warning("Failed to build auth env vars", exc_info=True)
             return {}
+
+    def _inject_auth_files(self, container: Container) -> None:
+        """Write auth JSON data into files inside the container.
+
+        This supplements the env-var approach for large cookie/header payloads
+        that may be truncated by sudo -E or shell environment limits.
+        The browser tool checks these files as a fallback when the env vars
+        are empty.
+        """
+        import json
+        import tarfile
+        from io import BytesIO
+
+        try:
+            from strix.telemetry.tracer import get_global_tracer
+
+            tracer = get_global_tracer()
+            if not tracer or not tracer.scan_config:
+                return
+            auth_config = tracer.scan_config.get("auth_config", {})
+            if not auth_config.get("configured"):
+                return
+
+            tar_buffer = BytesIO()
+            with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+                if auth_config.get("headers"):
+                    data = json.dumps(auth_config["headers"]).encode()
+                    info = tarfile.TarInfo(name="auth_headers.json")
+                    info.size = len(data)
+                    info.mode = 0o644
+                    tar.addfile(info, BytesIO(data))
+                if auth_config.get("cookies"):
+                    data = json.dumps(auth_config["cookies"]).encode()
+                    info = tarfile.TarInfo(name="auth_cookies.json")
+                    info.size = len(data)
+                    info.mode = 0o644
+                    tar.addfile(info, BytesIO(data))
+
+            tar_buffer.seek(0)
+            container.put_archive("/app/certs", tar_buffer.getvalue())
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to inject auth files into container", exc_info=True)
 
     def _get_scan_id(self, agent_id: str) -> str:
         try:
@@ -223,9 +273,21 @@ class DockerRuntime(AbstractRuntime):
                 image = self.client.images.get(image_name)
                 if not image.id or not image.attrs:
                     raise ImageNotFound(f"Image {image_name} metadata incomplete")  # noqa: TRY301
-            except (ImageNotFound, DockerException):
+            except ImageNotFound as exc:
                 if attempt == max_retries - 1:
-                    raise
+                    raise SandboxInitializationError(
+                        "Docker image not found",
+                        f"Image '{image_name}' was not found locally. "
+                        f"Pull it with: docker pull {image_name}",
+                    ) from exc
+                time.sleep(2**attempt)
+            except DockerException as e:
+                if attempt == max_retries - 1:
+                    raise SandboxInitializationError(
+                        "Failed to verify Docker image",
+                        f"Could not verify image '{image_name}': "
+                        f"{type(e).__name__}: {e}",
+                    ) from e
                 time.sleep(2**attempt)
             else:
                 return
@@ -245,13 +307,42 @@ class DockerRuntime(AbstractRuntime):
         if port_bindings.get(caido_port_key):
             self._caido_port = int(port_bindings[caido_port_key][0]["HostPort"])
 
-    def _wait_for_tool_server(self, max_retries: int = 30, timeout: int = 5) -> None:
+    def _get_container_logs(self, tail: int = 80) -> str:
+        """Retrieve recent container logs for diagnostics."""
+        if self._scan_container is None:
+            return "(no container)"
+        try:
+            logs: bytes = self._scan_container.logs(tail=tail)
+            return logs.decode("utf-8", errors="replace").strip()
+        except Exception:  # noqa: BLE001
+            return "(could not retrieve logs)"
+
+    def _check_container_alive(self) -> bool:
+        """Return True if the sandbox container is still running."""
+        if self._scan_container is None:
+            return False
+        try:
+            self._scan_container.reload()
+            return str(self._scan_container.status) == "running"
+        except (NotFound, DockerException):
+            return False
+
+    def _wait_for_tool_server(self, max_retries: int = 60, timeout: int = 5) -> None:
         host = self._resolve_docker_host()
         health_url = f"http://{host}:{self._tool_server_port}/health"
 
-        time.sleep(5)
+        time.sleep(3)
 
         for attempt in range(max_retries):
+            # Fail fast if the container died (entrypoint error, OOM, etc.)
+            if attempt % 3 == 0 and not self._check_container_alive():
+                logs = self._get_container_logs()
+                raise SandboxInitializationError(
+                    "Tool server failed to start",
+                    f"Container exited during initialization.\n"
+                    f"Container logs:\n{logs}",
+                )
+
             try:
                 with httpx.Client(trust_env=False, timeout=timeout) as client:
                     response = client.get(health_url)
@@ -262,11 +353,18 @@ class DockerRuntime(AbstractRuntime):
             except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError):
                 pass
 
-            time.sleep(min(2**attempt * 0.5, 5))
+            time.sleep(min(1 + attempt * 0.5, 5))
 
+        # Final diagnostics on timeout
+        alive = self._check_container_alive()
+        logs = self._get_container_logs()
+        status_detail = "Container is running but tool server not responding" if alive else (
+            "Container is not running"
+        )
         raise SandboxInitializationError(
             "Tool server failed to start",
-            "Container initialization timed out. Please try again.",
+            f"{status_detail}. Initialization timed out.\n"
+            f"Container logs:\n{logs}",
         )
 
     def _create_container(self, scan_id: str, max_retries: int = 2) -> Container:
@@ -307,39 +405,69 @@ class DockerRuntime(AbstractRuntime):
                 container_env.update(self._get_auth_env_vars())
                 container_env.update(self._get_zap_env_vars())
 
-                container = self.client.containers.run(
-                    image_name,
-                    command="sleep infinity",
-                    detach=True,
-                    name=container_name,
-                    hostname=container_name,
-                    ports={
-                        f"{CONTAINER_TOOL_SERVER_PORT}/tcp": self._tool_server_port,
-                        f"{CONTAINER_CAIDO_PORT}/tcp": self._caido_port,
-                    },
-                    cap_add=["NET_ADMIN", "NET_RAW"],
-                    labels={"strix-scan-id": scan_id},
-                    environment=container_env,
-                    extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
-                    tty=True,
-                )
+                try:
+                    container = self.client.containers.run(
+                        image_name,
+                        command="sleep infinity",
+                        detach=True,
+                        name=container_name,
+                        hostname=container_name,
+                        ports={
+                            f"{CONTAINER_TOOL_SERVER_PORT}/tcp": self._tool_server_port,
+                            f"{CONTAINER_CAIDO_PORT}/tcp": self._caido_port,
+                        },
+                        cap_add=["NET_ADMIN", "NET_RAW"],
+                        labels={"strix-scan-id": scan_id},
+                        environment=container_env,
+                        extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
+                        tty=True,
+                    )
+                except (DockerException, RequestsConnectionError, RequestsTimeout) as e:
+                    raise SandboxInitializationError(
+                        "Failed to create container",
+                        f"Docker API error on attempt {attempt + 1}/{max_retries + 1}: "
+                        f"{type(e).__name__}: {e}",
+                    ) from e
 
                 self._scan_container = container
+                self._inject_auth_files(container)
                 self._wait_for_tool_server()
 
-            except (DockerException, RequestsConnectionError, RequestsTimeout) as e:
+            except SandboxInitializationError as e:
                 last_error = e
+                logger.warning(
+                    "Sandbox initialization attempt %d/%d failed: %s — %s",
+                    attempt + 1,
+                    max_retries + 1,
+                    e.message,
+                    e.details,
+                )
                 if attempt < max_retries:
                     self._tool_server_port = None
                     self._tool_server_token = None
                     self._caido_port = None
+                    # Clean up the failed container before retrying
+                    with contextlib.suppress(NotFound, DockerException):
+                        failed = self.client.containers.get(container_name)
+                        with contextlib.suppress(Exception):
+                            failed.stop(timeout=5)
+                        failed.remove(force=True)
                     time.sleep(2**attempt)
             else:
                 return container
 
+        # Preserve the original error message and details from the last attempt
+        if isinstance(last_error, SandboxInitializationError):
+            raise SandboxInitializationError(
+                last_error.message,
+                f"{last_error.details}\n\n"
+                f"Failed after {max_retries + 1} attempts.",
+            ) from last_error.__cause__
+
         raise SandboxInitializationError(
             "Failed to create container",
-            f"Container creation failed after {max_retries + 1} attempts: {last_error}",
+            f"Container creation failed after {max_retries + 1} attempts: "
+            f"{type(last_error).__name__}: {last_error}",
         ) from last_error
 
     def _get_or_create_container(self, scan_id: str) -> Container:

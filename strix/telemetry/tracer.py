@@ -1,9 +1,10 @@
 import json
 import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from opentelemetry import trace

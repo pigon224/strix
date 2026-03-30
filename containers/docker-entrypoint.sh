@@ -118,6 +118,8 @@ export https_proxy=http://127.0.0.1:${CAIDO_PORT}
 export HTTP_PROXY=http://127.0.0.1:${CAIDO_PORT}
 export HTTPS_PROXY=http://127.0.0.1:${CAIDO_PORT}
 export ALL_PROXY=http://127.0.0.1:${CAIDO_PORT}
+export no_proxy=127.0.0.1,localhost
+export NO_PROXY=127.0.0.1,localhost
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export CAIDO_API_TOKEN=${TOKEN}
@@ -129,6 +131,8 @@ https_proxy=http://127.0.0.1:${CAIDO_PORT}
 HTTP_PROXY=http://127.0.0.1:${CAIDO_PORT}
 HTTPS_PROXY=http://127.0.0.1:${CAIDO_PORT}
 ALL_PROXY=http://127.0.0.1:${CAIDO_PORT}
+no_proxy=127.0.0.1,localhost
+NO_PROXY=127.0.0.1,localhost
 CAIDO_API_TOKEN=${TOKEN}
 EOF
 
@@ -160,18 +164,19 @@ export TOOL_SERVER_TIMEOUT="${STRIX_SANDBOX_EXECUTION_TIMEOUT:-120}"
 TOOL_SERVER_LOG="/tmp/tool_server.log"
 
 sudo -E -u pentester \
+  env no_proxy=127.0.0.1,localhost \
   poetry run python -m strix.runtime.tool_server \
   --token="$TOOL_SERVER_TOKEN" \
   --host=0.0.0.0 \
   --port="$TOOL_SERVER_PORT" \
   --timeout="$TOOL_SERVER_TIMEOUT" > "$TOOL_SERVER_LOG" 2>&1 &
 
-for i in {1..10}; do
-  if curl -s "http://127.0.0.1:$TOOL_SERVER_PORT/health" | grep -q '"status":"healthy"'; then
+for i in {1..30}; do
+  if curl -s --noproxy 127.0.0.1 "http://127.0.0.1:$TOOL_SERVER_PORT/health" | grep -q '"status":"healthy"'; then
     echo "✅ Tool server healthy on port $TOOL_SERVER_PORT"
     break
   fi
-  if [ $i -eq 10 ]; then
+  if [ $i -eq 30 ]; then
     echo "ERROR: Tool server failed to become healthy"
     echo "=== Tool server log ==="
     cat "$TOOL_SERVER_LOG" 2>/dev/null || echo "(no log)"
