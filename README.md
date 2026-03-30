@@ -127,6 +127,17 @@ export STRIX_REASONING_EFFORT="high"               # high (default) or medium (f
 
 Configuration is saved to `~/.strix/cli-config.json` on first run.
 
+#### Azure OpenAI (Azure AI Foundry)
+
+```bash
+export STRIX_LLM="azure/your-deployment-name"
+export LLM_API_KEY="your-azure-api-key"
+export LLM_API_BASE="https://your-resource.openai.azure.com/"
+export AZURE_API_VERSION="2024-08-01-preview"
+```
+
+`STRIX_LLM` must use the `azure/` prefix followed by the exact deployment name (not the model name) from Azure AI Foundry. `AZURE_API_VERSION` is required — without it you'll get a `404 Resource not found`.
+
 ### CI/CD (GitHub Actions)
 
 ```yaml

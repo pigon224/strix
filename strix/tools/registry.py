@@ -191,8 +191,11 @@ def _should_register_tool(
         return False
     if requires_web_search_mode and not _has_perplexity_api():
         return False
-    if requires_zap_mode and not _is_zap_enabled():
-        return False
+    if requires_zap_mode:
+        zap_enabled = _is_zap_enabled()
+        logger.info("ZAP mode check: STRIX_ZAP_ENABLED=%s, registered=%s", os.getenv("STRIX_ZAP_ENABLED"), zap_enabled)
+        if not zap_enabled:
+            return False
     return True
 
 
