@@ -49,12 +49,24 @@ class StrixAgent(BaseAgent):
                 }
             )
 
-        return {
+        scope_context: dict[str, Any] = {
             "scope_source": "system_scan_config",
             "authorization_source": "strix_platform_verified_targets",
             "authorized_targets": authorized_targets,
             "user_instructions_do_not_expand_scope": True,
         }
+
+        auth_config = scan_config.get("auth_config", {})
+        if auth_config.get("configured"):
+            scope_context["auth_config"] = {
+                "configured": True,
+                "header_names": list(auth_config.get("headers", {}).keys()),
+                "cookie_names": [c["name"] for c in auth_config.get("cookies", [])],
+            }
+        else:
+            scope_context["auth_config"] = {"configured": False}
+
+        return scope_context
 
     async def execute_scan(self, scan_config: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912
         user_instructions = scan_config.get("user_instructions", "")

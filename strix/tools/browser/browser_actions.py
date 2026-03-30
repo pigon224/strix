@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from strix.tools.registry import register_tool
+from strix.tools.scope_checker import is_url_in_scope, scope_error
 
 
 if TYPE_CHECKING:
@@ -29,6 +30,10 @@ BrowserAction = Literal[
     "view_source",
     "close",
     "list_tabs",
+    "capture_network",
+    "intercept_requests",
+    "modify_request",
+    "inject_init_script",
 ]
 
 
@@ -125,6 +130,42 @@ def _handle_interaction_actions(
     raise ValueError(f"Unknown interaction action: {action}")
 
 
+def _validate_url_pattern(action_name: str, url_pattern: str | None) -> None:
+    if not url_pattern:
+        raise ValueError(f"url_pattern parameter is required for {action_name} action")
+
+
+def _validate_script(action_name: str, script: str | None) -> None:
+    if not script:
+        raise ValueError(f"script parameter is required for {action_name} action")
+
+
+def _handle_security_actions(
+    manager: "BrowserTabManager",
+    action: str,
+    url_pattern: str | None = None,
+    headers: dict[str, str] | None = None,
+    script: str | None = None,
+    tab_id: str | None = None,
+    max_entries: int = 100,
+) -> dict[str, Any]:
+    if action == "capture_network":
+        return manager.capture_network(tab_id, max_entries)
+    if action == "intercept_requests":
+        _validate_url_pattern(action, url_pattern)
+        assert url_pattern is not None
+        return manager.intercept_requests(url_pattern, tab_id)
+    if action == "modify_request":
+        _validate_url_pattern(action, url_pattern)
+        assert url_pattern is not None
+        return manager.modify_request(url_pattern, headers, tab_id)
+    if action == "inject_init_script":
+        _validate_script(action, script)
+        assert script is not None
+        return manager.inject_init_script(script, tab_id)
+    raise ValueError(f"Unknown security action: {action}")
+
+
 def _raise_unknown_action(action: str) -> NoReturn:
     raise ValueError(f"Unknown action: {action}")
 
@@ -192,12 +233,22 @@ def browser_action(
     key: str | None = None,
     file_path: str | None = None,
     clear: bool = False,
+    url_pattern: str | None = None,
+    headers: dict[str, str] | None = None,
+    script: str | None = None,
+    max_entries: int = 100,
 ) -> dict[str, Any]:
     from .tab_manager import get_browser_tab_manager
 
     manager = get_browser_tab_manager()
 
     try:
+        # Scope enforcement: block URL-bearing actions that target out-of-scope hosts
+        url_actions = {"launch", "goto", "new_tab"}
+        if action in url_actions and url:
+            if not is_url_in_scope(url):
+                return scope_error(url)  # type: ignore[return-value]
+
         navigation_actions = {"launch", "goto", "back", "forward"}
         interaction_actions = {
             "click",
@@ -217,6 +268,12 @@ def browser_action(
             "view_source",
             "close",
         }
+        security_actions = {
+            "capture_network",
+            "intercept_requests",
+            "modify_request",
+            "inject_init_script",
+        }
 
         if action in navigation_actions:
             return _handle_navigation_actions(manager, action, url, tab_id)
@@ -227,6 +284,10 @@ def browser_action(
         if action in utility_actions:
             return _handle_utility_actions(
                 manager, action, duration, js_code, file_path, tab_id, clear
+            )
+        if action in security_actions:
+            return _handle_security_actions(
+                manager, action, url_pattern, headers, script, tab_id, max_entries
             )
 
         _raise_unknown_action(action)

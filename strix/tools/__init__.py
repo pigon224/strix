@@ -29,6 +29,7 @@ from .terminal import *  # noqa: F403
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403
+from .zap import *  # noqa: F403
 
 
 __all__ = [

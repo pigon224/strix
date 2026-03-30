@@ -14,7 +14,7 @@ class AgentState(BaseModel):
     agent_name: str = "Strix Agent"
     parent_id: str | None = None
     sandbox_id: str | None = None
-    sandbox_token: str | None = None
+    sandbox_token: str | None = Field(default=None, exclude=True)
     sandbox_info: dict[str, Any] | None = None
 
     task: str = ""
@@ -150,13 +150,19 @@ class AgentState(BaseModel):
     def get_conversation_history(self) -> list[dict[str, Any]]:
         return self.messages
 
+    def _safe_sandbox_info(self) -> dict[str, Any] | None:
+        """Return sandbox_info with sensitive fields redacted."""
+        if not self.sandbox_info:
+            return None
+        return {k: v for k, v in self.sandbox_info.items() if k != "auth_token"}
+
     def get_execution_summary(self) -> dict[str, Any]:
         return {
             "agent_id": self.agent_id,
             "agent_name": self.agent_name,
             "parent_id": self.parent_id,
             "sandbox_id": self.sandbox_id,
-            "sandbox_info": self.sandbox_info,
+            "sandbox_info": self._safe_sandbox_info(),
             "task": self.task,
             "iteration": self.iteration,
             "max_iterations": self.max_iterations,

@@ -742,6 +742,7 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "targets": args.targets_info,
             "user_instructions": args.instruction or "",
             "run_name": args.run_name,
+            "auth_config": getattr(args, "auth_config", {}),
         }
 
     def _build_agent_config(self, args: argparse.Namespace) -> dict[str, Any]:
@@ -918,6 +919,8 @@ class StrixTUIApp(App):  # type: ignore[misc]
         if agent_updates:
             self._expand_new_agent_nodes()
 
+        self._auto_select_active_agent()
+
         self._update_chat_view()
 
         self._update_agent_status_display()
@@ -925,6 +928,29 @@ class StrixTUIApp(App):  # type: ignore[misc]
         self._update_stats_display()
 
         self._update_vulnerabilities_panel()
+
+    def _auto_select_active_agent(self) -> None:
+        """Keep chat focused on a running agent when possible."""
+        if not self.tracer.agents:
+            return
+
+        current_id = self.selected_agent_id
+        current_status = None
+        if current_id and current_id in self.tracer.agents:
+            current_status = self.tracer.agents[current_id].get("status")
+
+        # If nothing is selected (or selected agent disappeared), pick the first available agent.
+        if not current_id or current_id not in self.tracer.agents:
+            first_agent_id = next(iter(self.tracer.agents.keys()))
+            self.selected_agent_id = first_agent_id
+            return
+
+        # If current selection is idle but another agent is actively running, follow the active one.
+        if current_status in {"waiting", "stopped", "completed", "failed", "llm_failed"}:
+            for agent_id, agent_data in list(self.tracer.agents.items()):
+                if agent_data.get("status") == "running" and agent_id != current_id:
+                    self.selected_agent_id = agent_id
+                    return
 
     def _update_agent_node(self, agent_id: str, agent_data: dict[str, Any]) -> bool:
         if agent_id not in self.agent_nodes:

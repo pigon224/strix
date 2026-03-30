@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import contextlib
+import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +18,8 @@ MAX_CONSOLE_LOG_LENGTH = 30_000
 MAX_INDIVIDUAL_LOG_LENGTH = 1_000
 MAX_CONSOLE_LOGS_COUNT = 200
 MAX_JS_RESULT_LENGTH = 5_000
+MAX_NETWORK_LOG_ENTRIES = 200
+MAX_RESPONSE_BODY_LENGTH = 10_000
 
 
 class _BrowserState:
@@ -100,6 +104,9 @@ class BrowserInstance:
         self._next_tab_id = 1
 
         self.console_logs: dict[str, list[dict[str, Any]]] = {}
+        self.network_log: dict[str, list[dict[str, Any]]] = {}
+        self._init_scripts: list[str] = []
+        self._auth_cookies_injected = False
 
     def _run_async(self, coro: Any) -> dict[str, Any]:
         if not self._loop or not self.is_running:
@@ -130,16 +137,67 @@ class BrowserInstance:
 
         page.on("console", handle_console)
 
+    async def _setup_network_capture(self, page: Page, tab_id: str) -> None:
+        self.network_log[tab_id] = []
+
+        def handle_request(request: Any) -> None:
+            entry: dict[str, Any] = {
+                "url": request.url,
+                "method": request.method,
+                "request_headers": dict(request.headers),
+                "request_body": request.post_data,
+                "status": None,
+                "response_headers": {},
+                "response_body": "",
+                "timestamp": asyncio.get_event_loop().time(),
+            }
+            log = self.network_log.setdefault(tab_id, [])
+            log.append(entry)
+            if len(log) > MAX_NETWORK_LOG_ENTRIES:
+                self.network_log[tab_id] = log[-MAX_NETWORK_LOG_ENTRIES:]
+
+        async def handle_response(response: Any) -> None:
+            log = self.network_log.get(tab_id, [])
+            for entry in reversed(log):
+                if entry.get("url") == response.url and entry.get("status") is None:
+                    entry["status"] = response.status
+                    entry["response_headers"] = dict(response.headers)
+                    try:
+                        body = await response.body()
+                        body_str = body.decode("utf-8", errors="replace")
+                        if len(body_str) > MAX_RESPONSE_BODY_LENGTH:
+                            body_str = body_str[:MAX_RESPONSE_BODY_LENGTH] + "... [TRUNCATED]"
+                        entry["response_body"] = body_str
+                    except Exception:  # noqa: BLE001
+                        entry["response_body"] = "[body unavailable]"
+                    break
+
+        page.on("request", handle_request)
+        page.on("response", lambda r: asyncio.ensure_future(handle_response(r)))
+
     async def _create_context(self, url: str | None = None) -> dict[str, Any]:
         assert self._browser is not None
 
-        self.context = await self._browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent=(
+        # Read pre-configured auth headers from environment (set by docker_runtime)
+        extra_http_headers: dict[str, str] = {}
+        auth_headers_raw = os.environ.get("STRIX_AUTH_HEADERS_JSON", "")
+        if auth_headers_raw:
+            try:
+                extra_http_headers = json.loads(auth_headers_raw)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        context_kwargs: dict[str, Any] = {
+            "viewport": {"width": 1280, "height": 720},
+            "user_agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             ),
-        )
+        }
+        if extra_http_headers:
+            context_kwargs["extra_http_headers"] = extra_http_headers
+
+        self.context = await self._browser.new_context(**context_kwargs)
 
         page = await self.context.new_page()
         tab_id = f"tab_{self._next_tab_id}"
@@ -148,6 +206,7 @@ class BrowserInstance:
         self.current_page_id = tab_id
 
         await self._setup_console_logging(page, tab_id)
+        await self._setup_network_capture(page, tab_id)
 
         if url:
             await page.goto(url, wait_until="domcontentloaded")
@@ -200,12 +259,29 @@ class BrowserInstance:
         with self._execution_lock:
             return self._run_async(self._goto(url, tab_id))
 
+    async def _inject_auth_cookies_if_needed(self, url: str) -> None:
+        """Inject pre-configured auth cookies on first navigation, bound to the target origin."""
+        if self._auth_cookies_injected or not self.context:
+            return
+        self._auth_cookies_injected = True
+        auth_cookies_raw = os.environ.get("STRIX_AUTH_COOKIES_JSON", "")
+        if not auth_cookies_raw:
+            return
+        try:
+            cookies: list[dict[str, str]] = json.loads(auth_cookies_raw)
+            for cookie in cookies:
+                await self.context.add_cookies([{**cookie, "url": url}])
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     async def _goto(self, url: str, tab_id: str | None = None) -> dict[str, Any]:
         if not tab_id:
             tab_id = self.current_page_id
 
         if not tab_id or tab_id not in self.pages:
             raise ValueError(f"Tab '{tab_id}' not found")
+
+        await self._inject_auth_cookies_if_needed(url)
 
         page = self.pages[tab_id]
         await page.goto(url, wait_until="domcontentloaded")
@@ -318,6 +394,7 @@ class BrowserInstance:
         self.current_page_id = tab_id
 
         await self._setup_console_logging(page, tab_id)
+        await self._setup_network_capture(page, tab_id)
 
         if url:
             await page.goto(url, wait_until="domcontentloaded")
@@ -351,6 +428,9 @@ class BrowserInstance:
 
         if tab_id in self.console_logs:
             del self.console_logs[tab_id]
+
+        if tab_id in self.network_log:
+            del self.network_log[tab_id]
 
         if self.current_page_id == tab_id:
             self.current_page_id = next(iter(self.pages.keys()))
@@ -552,6 +632,119 @@ class BrowserInstance:
         state["pdf_saved"] = file_path
         return state
 
+    def capture_network(self, tab_id: str | None = None, max_entries: int = 100) -> dict[str, Any]:
+        with self._execution_lock:
+            return self._run_async(self._capture_network(tab_id, max_entries))
+
+    async def _capture_network(
+        self, tab_id: str | None = None, max_entries: int = 100
+    ) -> dict[str, Any]:
+        if not tab_id:
+            tab_id = self.current_page_id
+
+        if not tab_id or tab_id not in self.pages:
+            raise ValueError(f"Tab '{tab_id}' not found")
+
+        log = self.network_log.get(tab_id, [])
+        entries = log[-max_entries:] if len(log) > max_entries else list(log)
+
+        state = await self._get_page_state(tab_id)
+        state["network_log"] = entries
+        state["total_captured"] = len(log)
+        return state
+
+    def intercept_requests(self, url_pattern: str, tab_id: str | None = None) -> dict[str, Any]:
+        with self._execution_lock:
+            return self._run_async(self._intercept_requests(url_pattern, tab_id))
+
+    async def _intercept_requests(
+        self, url_pattern: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
+        if not self.context:
+            raise ValueError("Browser not launched")
+
+        if not tab_id:
+            tab_id = self.current_page_id
+
+        log_tab_id = tab_id
+
+        async def handle_route(route: Any, request: Any) -> None:
+            entry: dict[str, Any] = {
+                "url": request.url,
+                "method": request.method,
+                "request_headers": dict(request.headers),
+                "request_body": request.post_data,
+                "intercepted": True,
+                "timestamp": asyncio.get_event_loop().time(),
+            }
+            log = self.network_log.setdefault(log_tab_id or "", [])
+            log.append(entry)
+            await route.continue_()
+
+        await self.context.route(url_pattern, handle_route)
+
+        state = await self._get_page_state(tab_id)
+        state["message"] = f"Request interception enabled for pattern: {url_pattern}"
+        return state
+
+    def modify_request(
+        self,
+        url_pattern: str,
+        headers: dict[str, str] | None = None,
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._execution_lock:
+            return self._run_async(self._modify_request(url_pattern, headers or {}, tab_id))
+
+    async def _modify_request(
+        self,
+        url_pattern: str,
+        headers: dict[str, str],
+        tab_id: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.context:
+            raise ValueError("Browser not launched")
+
+        if not tab_id:
+            tab_id = self.current_page_id
+
+        extra_headers = dict(headers)
+
+        async def handle_route(route: Any, request: Any) -> None:
+            merged_headers = {**request.headers, **extra_headers}
+            await route.continue_(headers=merged_headers)
+
+        await self.context.route(url_pattern, handle_route)
+
+        state = await self._get_page_state(tab_id)
+        state["message"] = (
+            f"Request modification enabled for pattern: {url_pattern}. "
+            f"Injected headers: {list(extra_headers.keys())}"
+        )
+        return state
+
+    def inject_init_script(self, script: str, tab_id: str | None = None) -> dict[str, Any]:
+        with self._execution_lock:
+            return self._run_async(self._inject_init_script(script, tab_id))
+
+    async def _inject_init_script(
+        self, script: str, tab_id: str | None = None
+    ) -> dict[str, Any]:
+        if not self.context:
+            raise ValueError("Browser not launched")
+
+        if not tab_id:
+            tab_id = self.current_page_id
+
+        await self.context.add_init_script(script=script)
+        self._init_scripts.append(script)
+
+        state = await self._get_page_state(tab_id)
+        state["message"] = (
+            f"Init script injected. Total active init scripts: {len(self._init_scripts)}"
+        )
+        return state
+
     def close(self) -> None:
         with self._execution_lock:
             self.is_running = False
@@ -562,8 +755,11 @@ class BrowserInstance:
 
             self.pages.clear()
             self.console_logs.clear()
+            self.network_log.clear()
+            self._init_scripts.clear()
             self.current_page_id = None
             self.context = None
+            self._auth_cookies_injected = False
 
     async def _close_context(self) -> None:
         try:

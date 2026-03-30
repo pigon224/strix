@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import os
 import signal
 import sys
@@ -47,7 +48,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials) -> str:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if credentials.credentials != EXPECTED_TOKEN:
+    if not hmac.compare_digest(credentials.credentials, EXPECTED_TOKEN):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",
@@ -141,9 +142,6 @@ async def health_check() -> dict[str, Any]:
         "status": "healthy",
         "sandbox_mode": str(SANDBOX_MODE),
         "environment": "sandbox" if SANDBOX_MODE else "main",
-        "auth_configured": "true" if EXPECTED_TOKEN else "false",
-        "active_agents": len(agent_tasks),
-        "agents": list(agent_tasks.keys()),
     }
 
 
